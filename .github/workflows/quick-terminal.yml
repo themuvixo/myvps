@@ -1,9 +1,17 @@
-name: Quick Instant Terminal (Zero-Auth, Instant Root Shell)
+name: Quick Instant Terminal (Zero-Auth)
 
 on:
   workflow_dispatch:
     inputs:
-      tunnel:
+      connection_method:
+        description: 'Choose Direct Connection Method'
+        required: true
+        default: 'web_terminal'
+        type: choice
+        options:
+          - 'web_terminal'
+          - 'ssh_terminal'
+      tunnel_provider:
         description: 'Tunnel Provider (Zero-Auth)'
         required: true
         default: 'trycloudflare'
@@ -12,10 +20,11 @@ on:
           - 'trycloudflare'
           - 'tmate'
           - 'bore'
+          - 'pinggy'
 
 jobs:
   terminal:
-    name: Instant Terminal (${{ inputs.tunnel }})
+    name: Terminal (${{ inputs.connection_method }} / ${{ inputs.tunnel_provider }})
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -25,32 +34,41 @@ jobs:
           echo "=== Setting root & runner credentials ==="
           echo "runner:Cynet@2026" | sudo chpasswd
           echo "root:Cynet@2026" | sudo chpasswd
+          sudo usermod -aG sudo runner
           echo "runner ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/runner
           sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo systemctl restart ssh || sudo service ssh restart || true
 
-      - name: 2. TryCloudflare Web Terminal (Direct Browser Root Shell - No Login Prompt)
-        if: ${{ inputs.tunnel == 'trycloudflare' }}
+      - name: 2. Setup Web Terminal (Direct Browser - Auto Root Login)
+        if: ${{ inputs.connection_method == 'web_terminal' && inputs.tunnel_provider != 'tmate' }}
         run: |
-          echo "=== Stopping any background ttyd service ==="
+          echo "=== Setting up standalone ttyd web terminal ==="
           sudo systemctl stop ttyd 2>/dev/null || true
           sudo systemctl disable ttyd 2>/dev/null || true
           sudo pkill -9 ttyd 2>/dev/null || true
 
-          echo "=== Downloading official standalone ttyd & cloudflared ==="
           sudo curl -fsSL https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64 -o /usr/local/bin/ttyd
           sudo chmod +x /usr/local/bin/ttyd
-
-          sudo curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
-          sudo chmod +x /usr/local/bin/cloudflared
-
-          # Launch ttyd directly into interactive root bash with auto-login (bypasses login prompt completely!)
+          # Auto-login directly into root bash (no login prompt!)
           sudo /usr/local/bin/ttyd -p 7681 -W /bin/bash > /tmp/ttyd.log 2>&1 &
           sleep 2
 
-          # Start TryCloudflare tunnel
-          /usr/local/bin/cloudflared tunnel --url http://localhost:7681 --no-autoupdate > /tmp/cf.log 2>&1 &
+      # TryCloudflare handler
+      - name: 3. Tunnel: TryCloudflare (Zero-Auth)
+        if: ${{ inputs.tunnel_provider == 'trycloudflare' }}
+        run: |
+          echo "=== Launching TryCloudflare ==="
+          sudo curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+          sudo chmod +x /usr/local/bin/cloudflared
+
+          if [ "${{ inputs.connection_method }}" = "web_terminal" ]; then
+            TARGET="http://localhost:7681"
+          else
+            TARGET="tcp://localhost:22"
+          fi
+
+          /usr/local/bin/cloudflared tunnel --url "$TARGET" --no-autoupdate > /tmp/cf.log 2>&1 &
 
           TUNNEL_URL=""
           for i in {1..50}; do
@@ -60,46 +78,58 @@ jobs:
           done
 
           if [ -z "$TUNNEL_URL" ]; then
-            echo "Cloudflare log output:"
+            echo "Cloudflare logs:"
             cat /tmp/cf.log
             exit 1
           fi
 
           echo "=================================================="
-          echo ">>> ZERO-AUTH WEB TERMINAL READY (NO LOGIN REQUIRED) <<<"
-          echo "URL: $TUNNEL_URL"
+          echo ">>> TRYCLOUDFLARE READY <<<"
+          echo "URL / Hostname: $TUNNEL_URL"
           echo "=================================================="
 
-          {
-            echo "## ⚡ Instant Cloud Terminal Ready!"
-            echo ""
-            echo "### 🌐 [Click here to open Web Terminal in Browser]($TUNNEL_URL)"
-            echo ""
-            echo "- **Direct Browser Link**: [$TUNNEL_URL]($TUNNEL_URL)"
-            echo "- **Status**: Direct interactive root shell (Auto-logged in, no username or password required!)"
-            echo "- **Backup Credentials** (if ever prompted): User: \`runner\` or \`root\` | Password: \`Cynet@2026\`"
-          } >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.connection_method }}" = "web_terminal" ]; then
+            {
+              echo "## ⚡ Web Terminal Ready (TryCloudflare)"
+              echo ""
+              echo "### 🌐 [Click to Open Web Terminal in Browser]($TUNNEL_URL)"
+              echo ""
+              echo "- **Link**: [$TUNNEL_URL]($TUNNEL_URL)"
+              echo "- **Status**: Instant Root Bash (No login needed!)"
+            } >> $GITHUB_STEP_SUMMARY
+          else
+            {
+              echo "## ⚡ SSH Terminal Ready (TryCloudflare)"
+              echo ""
+              echo "- **Tunnel Hostname**: \`$TUNNEL_URL\`"
+              echo "- **Local proxy**: \`cloudflared access tcp --hostname $TUNNEL_URL --url localhost:2222\`"
+              echo "- **SSH command**: \`ssh runner@localhost -p 2222\` (password: \`Cynet@2026\`)"
+            } >> $GITHUB_STEP_SUMMARY
+          fi
 
-          for i in {1..360}; do
-            sleep 60
-            echo "[$i/360 min] Terminal session active..."
-          done
-
-      - name: 3. Tmate Terminal (Zero-Auth)
-        if: ${{ inputs.tunnel == 'tmate' }}
+      # Tmate handler
+      - name: 4. Tunnel: Tmate (Zero-Auth Instant Web & SSH)
+        if: ${{ inputs.tunnel_provider == 'tmate' }}
         uses: mxschmitt/action-tmate@v3
         with:
           detached: false
           limit-access-to-actor: false
 
-      - name: 4. Bore Direct TCP SSH Terminal
-        if: ${{ inputs.tunnel == 'bore' }}
+      # Bore handler
+      - name: 5. Tunnel: Bore (Zero-Auth Direct TCP)
+        if: ${{ inputs.tunnel_provider == 'bore' }}
         run: |
           echo "=== Setting up Bore Tunnel ==="
           curl -sL https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /tmp
           chmod +x /tmp/bore
 
-          /tmp/bore local 22 --to bore.pub > /tmp/bore.log 2>&1 &
+          if [ "${{ inputs.connection_method }}" = "web_terminal" ]; then
+            TARGET_PORT=7681
+          else
+            TARGET_PORT=22
+          fi
+
+          /tmp/bore local $TARGET_PORT --to bore.pub > /tmp/bore.log 2>&1 &
 
           REMOTE_PORT=""
           for i in {1..30}; do
@@ -109,17 +139,58 @@ jobs:
           done
 
           echo "=================================================="
-          echo ">>> BORE DIRECT SSH READY <<<"
-          echo "SSH Command : ssh runner@bore.pub -p $REMOTE_PORT"
-          echo "Password    : Cynet@2026"
+          echo ">>> BORE TUNNEL READY <<<"
+          echo "bore.pub:$REMOTE_PORT"
           echo "=================================================="
 
+          if [ "${{ inputs.connection_method }}" = "web_terminal" ]; then
+            {
+              echo "## ⚡ Web Terminal Ready (Bore)"
+              echo ""
+              echo "### 🌐 [Open Web Terminal: http://bore.pub:$REMOTE_PORT](http://bore.pub:$REMOTE_PORT)"
+              echo "- **Direct Link**: \`http://bore.pub:$REMOTE_PORT\`"
+            } >> $GITHUB_STEP_SUMMARY
+          else
+            {
+              echo "## ⚡ SSH Ready (Bore Direct TCP)"
+              echo ""
+              echo "- **SSH Command**: \`ssh runner@bore.pub -p $REMOTE_PORT\`"
+              echo "- **Password**: \`Cynet@2026\`"
+            } >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # Pinggy handler
+      - name: 6. Tunnel: Pinggy (Zero-Auth)
+        if: ${{ inputs.tunnel_provider == 'pinggy' }}
+        run: |
+          echo "=== Setting up Pinggy ==="
+          if [ "${{ inputs.connection_method }}" = "web_terminal" ]; then
+            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -N -p 443 -R0:localhost:7681 a.pinggy.io > /tmp/pinggy.log 2>&1 &
+          else
+            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -N -p 443 -R0:localhost:22 tcp@a.pinggy.io > /tmp/pinggy.log 2>&1 &
+          fi
+
+          PINGGY_CONN=""
+          for i in {1..30}; do
+            sleep 2
+            PINGGY_CONN=$(grep -o '[a-z0-9.]*\.a\.pinggy\.io:[0-9]*' /tmp/pinggy.log | head -n 1)
+            if [ -z "$PINGGY_CONN" ]; then
+              PINGGY_CONN=$(grep -o 'https://[a-z0-9.]*\.a\.pinggy\.io' /tmp/pinggy.log | head -n 1)
+            fi
+            if [ -n "$PINGGY_CONN" ]; then break; fi
+          done
+
+          echo "Endpoint: $PINGGY_CONN"
+
           {
-            echo "## ⚡ Bore SSH Ready!"
-            echo "- **Command**: \`ssh runner@bore.pub -p $REMOTE_PORT\`"
-            echo "- **Password**: \`Cynet@2026\`"
+            echo "## ⚡ Terminal Ready (Pinggy)"
+            echo "- **Connection Target / URL**: \`$PINGGY_CONN\`"
+            echo "- **User**: \`runner\` (Password: \`Cynet@2026\`)"
           } >> $GITHUB_STEP_SUMMARY
 
+      - name: 7. Keep Session Alive
+        if: ${{ inputs.tunnel_provider != 'tmate' }}
+        run: |
           for i in {1..360}; do
             sleep 60
             echo "[$i/360 min] Terminal active..."

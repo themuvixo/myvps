@@ -3,22 +3,22 @@ name: macOS Cloud VPS (Universal)
 on:
   workflow_dispatch:
     inputs:
-      service:
-        description: 'Target Service'
+      connection_method:
+        description: 'Choose Direct Connection Method'
         required: true
-        default: 'ssh'
+        default: 'ssh_terminal'
         type: choice
         options:
-          - 'ssh'
-          - 'vnc'
-      tunnel:
+          - 'ssh_terminal'
+          - 'vnc_screen_sharing'
+      tunnel_provider:
         description: 'Tunnel Provider (Zero-Auth except Tailscale)'
         required: true
-        default: 'tmate'
+        default: 'trycloudflare'
         type: choice
         options:
-          - 'tmate'
           - 'trycloudflare'
+          - 'tmate'
           - 'bore'
           - 'pinggy'
           - 'tailscale'
@@ -35,7 +35,7 @@ on:
 
 jobs:
   macos-vps:
-    name: macOS VPS (${{ inputs.service }} / ${{ inputs.tunnel }})
+    name: macOS VPS (${{ inputs.connection_method }} / ${{ inputs.tunnel_provider }})
     runs-on: macos-latest
     timeout-minutes: 360
 
@@ -45,40 +45,35 @@ jobs:
           USER_PASS="${{ inputs.password || 'Cynet@2026' }}"
           sudo dscl . -passwd /Users/runner "$USER_PASS" || true
           echo "runner password configured."
-          
-          # Enable SSH Remote Login
           sudo systemsetup -setremotelogin on || true
 
       - name: 2. Enable macOS Screen Sharing / VNC (If VNC selected)
-        if: ${{ inputs.service == 'vnc' }}
+        if: ${{ inputs.connection_method == 'vnc_screen_sharing' }}
         run: |
           USER_PASS="${{ inputs.password || 'Cynet@2026' }}"
           echo "=== Configuring macOS Screen Sharing (VNC port 5900) ==="
           sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           
-          # Configure kickstart with VNC legacy password support
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -clientopts -setvnclegacy -vnclegacy yes \
             -setvncpw -vncpw "$USER_PASS" -restart -agent -privs -all || true
-          
-          echo "Screen Sharing enabled on port 5900."
 
-      - name: 3. Setup Tmate Session (Instant Web & SSH Terminal)
-        if: ${{ inputs.tunnel == 'tmate' }}
+      - name: 3. Tmate Tunnel (Instant Web & SSH)
+        if: ${{ inputs.tunnel_provider == 'tmate' }}
         uses: mxschmitt/action-tmate@v3
         with:
           detached: true
           limit-access-to-actor: false
 
       - name: 4. TryCloudflare Tunnel (Zero-Auth)
-        if: ${{ inputs.tunnel == 'trycloudflare' }}
+        if: ${{ inputs.tunnel_provider == 'trycloudflare' }}
         run: |
           echo "=== Setting up TryCloudflare on macOS ==="
           brew install cloudflare/cloudflare/cloudflared
           
           PORT=22
-          if [ "${{ inputs.service }}" = "vnc" ]; then PORT=5900; fi
+          if [ "${{ inputs.connection_method }}" = "vnc_screen_sharing" ]; then PORT=5900; fi
           
           cloudflared tunnel --url "tcp://localhost:$PORT" --no-autoupdate > /tmp/cf.log 2>&1 &
           
@@ -96,9 +91,8 @@ jobs:
           
           {
             echo "### 🍎 macOS Ready (TryCloudflare)"
-            echo ""
             echo "- **Tunnel Hostname**: \`$TUNNEL_URL\`"
-            if [ "${{ inputs.service }}" = "vnc" ]; then
+            if [ "${{ inputs.connection_method }}" = "vnc_screen_sharing" ]; then
               echo "- **Local VNC Proxy Command**: \`cloudflared access tcp --hostname $TUNNEL_URL --url localhost:15900\`"
               echo "- **Connect with VNC Viewer**: \`localhost:15900\` (Password: \`${{ inputs.password || 'Cynet@2026' }}\`)"
             else
@@ -108,7 +102,7 @@ jobs:
           } >> $GITHUB_STEP_SUMMARY
 
       - name: 5. Bore Tunnel (Zero-Auth Direct TCP)
-        if: ${{ inputs.tunnel == 'bore' }}
+        if: ${{ inputs.tunnel_provider == 'bore' }}
         run: |
           echo "=== Setting up Bore Tunnel on macOS ==="
           ARCH=$(uname -m)
@@ -122,7 +116,7 @@ jobs:
           chmod +x /tmp/bore
           
           PORT=22
-          if [ "${{ inputs.service }}" = "vnc" ]; then PORT=5900; fi
+          if [ "${{ inputs.connection_method }}" = "vnc_screen_sharing" ]; then PORT=5900; fi
           
           /tmp/bore local $PORT --to bore.pub > /tmp/bore.log 2>&1 &
           
@@ -133,16 +127,10 @@ jobs:
             if [ -n "$REMOTE_PORT" ]; then break; fi
           done
           
-          echo "=================================================="
-          echo ">>> BORE TUNNEL READY <<<"
-          echo "Host: bore.pub | Port: $REMOTE_PORT"
-          echo "=================================================="
-          
           {
             echo "### 🍎 macOS VPS Ready (Bore Direct TCP)"
-            echo ""
             echo "- **Endpoint**: \`bore.pub:$REMOTE_PORT\`"
-            if [ "${{ inputs.service }}" = "vnc" ]; then
+            if [ "${{ inputs.connection_method }}" = "vnc_screen_sharing" ]; then
               echo "- **Connect with VNC Viewer**: \`bore.pub:$REMOTE_PORT\`"
             else
               echo "- **Connect with SSH**: \`ssh runner@bore.pub -p $REMOTE_PORT\`"
@@ -151,11 +139,11 @@ jobs:
           } >> $GITHUB_STEP_SUMMARY
 
       - name: 6. Pinggy Tunnel (Zero-Auth)
-        if: ${{ inputs.tunnel == 'pinggy' }}
+        if: ${{ inputs.tunnel_provider == 'pinggy' }}
         run: |
           echo "=== Setting up Pinggy Tunnel on macOS ==="
           PORT=22
-          if [ "${{ inputs.service }}" = "vnc" ]; then PORT=5900; fi
+          if [ "${{ inputs.connection_method }}" = "vnc_screen_sharing" ]; then PORT=5900; fi
           
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -N -p 443 -R0:localhost:$PORT tcp@a.pinggy.io > /tmp/pinggy.log 2>&1 &
           
@@ -168,14 +156,12 @@ jobs:
           
           {
             echo "### 🍎 macOS Ready (Pinggy Tunnel)"
-            echo ""
             echo "- **Endpoint**: \`$PINGGY_CONN\`"
-            echo "- **User**: \`runner\`"
-            echo "- **Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
+            echo "- **User**: \`runner\` | **Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
           } >> $GITHUB_STEP_SUMMARY
 
       - name: 7. Tailscale (VPN Mesh with Auth Key)
-        if: ${{ inputs.tunnel == 'tailscale' }}
+        if: ${{ inputs.tunnel_provider == 'tailscale' }}
         env:
           TS_KEY: ${{ inputs.tailscale_authkey || secrets.TAILSCALE_AUTHKEY }}
         run: |
@@ -189,14 +175,11 @@ jobs:
           sudo tailscale up --authkey="$TS_KEY" --hostname="github-macos-vps"
           
           TS_IP=$(tailscale ip -4)
-          echo "Tailscale IP: $TS_IP"
-          
           {
             echo "### 🍎 macOS Ready (Tailscale VPN)"
-            echo ""
             echo "- **Tailscale IP**: \`$TS_IP\`"
             echo "- **SSH**: \`ssh runner@$TS_IP\`"
-            if [ "${{ inputs.service }}" = "vnc" ]; then
+            if [ "${{ inputs.connection_method }}" = "vnc_screen_sharing" ]; then
               echo "- **VNC**: \`vnc://$TS_IP:5900\`"
             fi
             echo "- **Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
