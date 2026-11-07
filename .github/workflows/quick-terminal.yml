@@ -1,16 +1,16 @@
-name: Quick Instant Terminal (Zero-Auth)
+name: Quick Instant Terminal (Zero-Auth, Instant Root Shell)
 
 on:
   workflow_dispatch:
     inputs:
       tunnel:
-        description: 'Tunnel Provider'
+        description: 'Tunnel Provider (Zero-Auth)'
         required: true
-        default: 'tmate'
+        default: 'trycloudflare'
         type: choice
         options:
-          - 'tmate'
           - 'trycloudflare'
+          - 'tmate'
           - 'bore'
 
 jobs:
@@ -20,92 +20,107 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Setup Tmate (Battle-tested Instant Web & SSH Terminal)
+      - name: 1. System Setup & Password Configuration
+        run: |
+          echo "=== Setting root & runner credentials ==="
+          echo "runner:Cynet@2026" | sudo chpasswd
+          echo "root:Cynet@2026" | sudo chpasswd
+          echo "runner ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/runner
+          sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh || sudo service ssh restart || true
+
+      - name: 2. TryCloudflare Web Terminal (Direct Browser Root Shell - No Login Prompt)
+        if: ${{ inputs.tunnel == 'trycloudflare' }}
+        run: |
+          echo "=== Stopping any background ttyd service ==="
+          sudo systemctl stop ttyd 2>/dev/null || true
+          sudo systemctl disable ttyd 2>/dev/null || true
+          sudo pkill -9 ttyd 2>/dev/null || true
+
+          echo "=== Downloading official standalone ttyd & cloudflared ==="
+          sudo curl -fsSL https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64 -o /usr/local/bin/ttyd
+          sudo chmod +x /usr/local/bin/ttyd
+
+          sudo curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+          sudo chmod +x /usr/local/bin/cloudflared
+
+          # Launch ttyd directly into interactive root bash with auto-login (bypasses login prompt completely!)
+          sudo /usr/local/bin/ttyd -p 7681 -W /bin/bash > /tmp/ttyd.log 2>&1 &
+          sleep 2
+
+          # Start TryCloudflare tunnel
+          /usr/local/bin/cloudflared tunnel --url http://localhost:7681 --no-autoupdate > /tmp/cf.log 2>&1 &
+
+          TUNNEL_URL=""
+          for i in {1..50}; do
+            sleep 2
+            TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -n 1)
+            if [ -n "$TUNNEL_URL" ]; then break; fi
+          done
+
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "Cloudflare log output:"
+            cat /tmp/cf.log
+            exit 1
+          fi
+
+          echo "=================================================="
+          echo ">>> ZERO-AUTH WEB TERMINAL READY (NO LOGIN REQUIRED) <<<"
+          echo "URL: $TUNNEL_URL"
+          echo "=================================================="
+
+          {
+            echo "## ⚡ Instant Cloud Terminal Ready!"
+            echo ""
+            echo "### 🌐 [Click here to open Web Terminal in Browser]($TUNNEL_URL)"
+            echo ""
+            echo "- **Direct Browser Link**: [$TUNNEL_URL]($TUNNEL_URL)"
+            echo "- **Status**: Direct interactive root shell (Auto-logged in, no username or password required!)"
+            echo "- **Backup Credentials** (if ever prompted): User: \`runner\` or \`root\` | Password: \`Cynet@2026\`"
+          } >> $GITHUB_STEP_SUMMARY
+
+          for i in {1..360}; do
+            sleep 60
+            echo "[$i/360 min] Terminal session active..."
+          done
+
+      - name: 3. Tmate Terminal (Zero-Auth)
         if: ${{ inputs.tunnel == 'tmate' }}
         uses: mxschmitt/action-tmate@v3
         with:
           detached: false
           limit-access-to-actor: false
 
-      - name: Setup TryCloudflare Web Terminal
-        if: ${{ inputs.tunnel == 'trycloudflare' }}
-        run: |
-          echo "=== Installing ttyd & cloudflared ==="
-          sudo apt-get update -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ttyd
-          curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
-          chmod +x /tmp/cloudflared
-          
-          # Start ttyd web terminal on port 7681 with root bash
-          sudo ttyd -p 7681 -W bash &
-          sleep 2
-          
-          /tmp/cloudflared tunnel --url http://localhost:7681 --no-autoupdate > /tmp/cf.log 2>&1 &
-          
-          TUNNEL_URL=""
-          for i in {1..40}; do
-            sleep 2
-            TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -n 1)
-            if [ -n "$TUNNEL_URL" ]; then break; fi
-          done
-          
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "Cloudflare logs:"
-            cat /tmp/cf.log
-            exit 1
-          fi
-          
-          echo "=================================================="
-          echo ">>> INSTANT WEB TERMINAL READY (TryCloudflare) <<<"
-          echo "Open in browser: $TUNNEL_URL"
-          echo "=================================================="
-          
-          {
-            echo "## ⚡ Instant Web Terminal Ready!"
-            echo ""
-            echo "### 🌐 [Click here to open Web Terminal in Browser]($TUNNEL_URL)"
-            echo ""
-            echo "- **Direct URL**: \`$TUNNEL_URL\`"
-            echo "- *Zero software, zero accounts, full root access in browser.*"
-          } >> $GITHUB_STEP_SUMMARY
-          
-          for i in {1..360}; do
-            sleep 60
-            echo "[$i/360 min] Terminal session active..."
-          done
-
-      - name: Setup Bore Direct SSH Terminal
+      - name: 4. Bore Direct TCP SSH Terminal
         if: ${{ inputs.tunnel == 'bore' }}
         run: |
           echo "=== Setting up Bore Tunnel ==="
           curl -sL https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /tmp
           chmod +x /tmp/bore
-          
-          echo "runner:Cynet@2026" | sudo chpasswd
-          sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo systemctl restart ssh || sudo service ssh restart
-          
+
           /tmp/bore local 22 --to bore.pub > /tmp/bore.log 2>&1 &
-          
+
           REMOTE_PORT=""
           for i in {1..30}; do
             sleep 2
             REMOTE_PORT=$(grep -o 'bore.pub:[0-9]*' /tmp/bore.log | head -n 1 | cut -d: -f2)
             if [ -n "$REMOTE_PORT" ]; then break; fi
           done
-          
+
           echo "=================================================="
-          echo ">>> BORE SSH READY <<<"
-          echo "Connect: ssh runner@bore.pub -p $REMOTE_PORT"
-          echo "Password: Cynet@2026"
+          echo ">>> BORE DIRECT SSH READY <<<"
+          echo "SSH Command : ssh runner@bore.pub -p $REMOTE_PORT"
+          echo "Password    : Cynet@2026"
           echo "=================================================="
-          
+
           {
             echo "## ⚡ Bore SSH Ready!"
-            echo "- **SSH Command**: \`ssh runner@bore.pub -p $REMOTE_PORT\`"
+            echo "- **Command**: \`ssh runner@bore.pub -p $REMOTE_PORT\`"
             echo "- **Password**: \`Cynet@2026\`"
           } >> $GITHUB_STEP_SUMMARY
-          
+
           for i in {1..360}; do
             sleep 60
-            echo "[$i/360 min] Terminal session active..."
+            echo "[$i/360 min] Terminal active..."
           done

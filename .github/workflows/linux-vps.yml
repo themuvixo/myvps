@@ -14,11 +14,11 @@ on:
       tunnel:
         description: 'Primary Tunnel Provider (Zero-Auth except Tailscale)'
         required: true
-        default: 'tmate'
+        default: 'trycloudflare'
         type: choice
         options:
-          - 'tmate'
           - 'trycloudflare'
+          - 'tmate'
           - 'bore'
           - 'pinggy'
           - 'tailscale'
@@ -51,7 +51,8 @@ jobs:
           
           # Enable password authentication in SSH
           sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo systemctl restart ssh || sudo service ssh restart
+          sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh || sudo service ssh restart || true
 
       - name: 2. Install Desktop Environment & noVNC (If GUI selected)
         if: ${{ inputs.mode == 'gui' }}
@@ -66,14 +67,14 @@ jobs:
           sudo cp ~/.xsession /home/runner/.xsession
           sudo chown runner:runner /home/runner/.xsession
           sudo adduser xrdp ssl-cert || true
-          sudo systemctl restart xrdp || sudo service xrdp restart
+          sudo systemctl restart xrdp || sudo service xrdp restart || true
 
           # Configure X11VNC & noVNC for browser-based desktop access
           mkdir -p ~/.vnc
           USER_PASS="${{ inputs.password || 'Cynet@2026' }}"
           x11vnc -storepasswd "$USER_PASS" ~/.vnc/passwd
           
-          # Index redirect for noVNC
+          # Index redirect for noVNC so visiting root URL directly opens desktop
           sudo ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html || true
           
           # Start virtual display & VNC server
@@ -81,36 +82,38 @@ jobs:
           sleep 2
           DISPLAY=:1 xfce4-session &
           sleep 2
+          # x11vnc with shared and forever
           x11vnc -display :1 -rfbauth ~/.vnc/passwd -rfbport 5900 -forever -shared -bg
           sleep 1
           # Launch noVNC web proxy on port 6080
           websockify --web /usr/share/novnc 6080 localhost:5900 &
           sleep 2
 
-      - name: 3. Setup Tmate Session (Instant Web & SSH Terminal)
-        if: ${{ inputs.tunnel == 'tmate' }}
-        uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-          limit-access-to-actor: false
-
-      - name: 4. Setup TryCloudflare Tunnel (Zero-Auth)
+      - name: 3. Setup TryCloudflare Tunnel (Zero-Auth)
         if: ${{ inputs.tunnel == 'trycloudflare' }}
         run: |
           echo "=== Setting up TryCloudflare ==="
-          curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
-          chmod +x /tmp/cloudflared
+          sudo curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+          sudo chmod +x /usr/local/bin/cloudflared
           
           if [ "${{ inputs.mode }}" = "gui" ]; then
             TARGET_URL="http://localhost:6080"
           else
-            TARGET_URL="tcp://localhost:22"
+            # For CLI mode, install standalone ttyd for direct root web terminal
+            sudo systemctl stop ttyd 2>/dev/null || true
+            sudo systemctl disable ttyd 2>/dev/null || true
+            sudo pkill -9 ttyd 2>/dev/null || true
+            sudo curl -fsSL https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64 -o /usr/local/bin/ttyd
+            sudo chmod +x /usr/local/bin/ttyd
+            sudo /usr/local/bin/ttyd -p 7681 -W /bin/bash > /tmp/ttyd.log 2>&1 &
+            sleep 2
+            TARGET_URL="http://localhost:7681"
           fi
           
-          /tmp/cloudflared tunnel --url "$TARGET_URL" --no-autoupdate > /tmp/cf.log 2>&1 &
+          /usr/local/bin/cloudflared tunnel --url "$TARGET_URL" --no-autoupdate > /tmp/cf.log 2>&1 &
           
           TUNNEL_URL=""
-          for i in {1..45}; do
+          for i in {1..50}; do
             sleep 2
             TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -n 1)
             if [ -n "$TUNNEL_URL" ]; then break; fi
@@ -132,18 +135,25 @@ jobs:
               echo "### 🐧 Linux Desktop Ready (TryCloudflare)"
               echo ""
               echo "- 🌐 **Direct Browser Desktop**: [$TUNNEL_URL]($TUNNEL_URL)"
-              echo "- 🔑 **VNC Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
+              echo "- 🔑 **Desktop Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
               echo "- *Open the link above in any browser, click Connect, enter password to control the XFCE desktop!*"
             } >> $GITHUB_STEP_SUMMARY
           else
             {
-              echo "### 🐧 Linux SSH via TryCloudflare"
+              echo "### 🐧 Linux Web Terminal Ready (TryCloudflare)"
               echo ""
-              echo "- **Tunnel Hostname**: \`$TUNNEL_URL\`"
-              echo "- **Local SSH proxy**: \`cloudflared access tcp --hostname $TUNNEL_URL --url localhost:2222\`"
-              echo "- **Connect via SSH**: \`ssh runner@localhost -p 2222\` (password: \`${{ inputs.password || 'Cynet@2026' }}\`)"
+              echo "- 🌐 **Direct Browser Terminal**: [$TUNNEL_URL]($TUNNEL_URL)"
+              echo "- **Access**: Direct interactive root shell (Auto-logged in, no login prompt!)"
+              echo "- **Username**: \`runner\` or \`root\` | **Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
             } >> $GITHUB_STEP_SUMMARY
           fi
+
+      - name: 4. Setup Tmate Session (Zero-Auth)
+        if: ${{ inputs.tunnel == 'tmate' }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+          limit-access-to-actor: false
 
       - name: 5. Setup Bore Tunnel (Zero-Auth Direct TCP)
         if: ${{ inputs.tunnel == 'bore' }}
