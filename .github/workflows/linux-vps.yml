@@ -1,0 +1,263 @@
+name: Linux Cloud VPS (Universal)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Environment Type (CLI Headless vs GUI Desktop)'
+        required: true
+        default: 'gui'
+        type: choice
+        options:
+          - 'gui'
+          - 'cli'
+      tunnel:
+        description: 'Primary Tunnel Provider (Zero-Auth except Tailscale)'
+        required: true
+        default: 'tmate'
+        type: choice
+        options:
+          - 'tmate'
+          - 'trycloudflare'
+          - 'bore'
+          - 'pinggy'
+          - 'tailscale'
+      password:
+        description: 'User & VNC/RDP Password (default: Cynet@2026)'
+        required: false
+        default: 'Cynet@2026'
+        type: string
+      tailscale_authkey:
+        description: 'Tailscale Auth Key (Only needed if tunnel is tailscale)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  linux-vps:
+    name: Linux VPS (${{ inputs.mode }} / ${{ inputs.tunnel }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. System Setup & User Configuration
+        run: |
+          echo "=== Configuring System & User ==="
+          USER_PASS="${{ inputs.password || 'Cynet@2026' }}"
+          echo "runner:$USER_PASS" | sudo chpasswd
+          echo "root:$USER_PASS" | sudo chpasswd
+          sudo usermod -aG sudo runner
+          echo "runner ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/runner
+          
+          # Enable password authentication in SSH
+          sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh || sudo service ssh restart
+
+      - name: 2. Install Desktop Environment & noVNC (If GUI selected)
+        if: ${{ inputs.mode == 'gui' }}
+        run: |
+          echo "=== Installing XFCE Desktop, XRDP & noVNC Web GUI ==="
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            xfce4 xfce4-goodies xrdp websockify novnc x11vnc xvfb dbus-x11
+          
+          # Configure XRDP
+          echo "xfce4-session" > ~/.xsession
+          sudo cp ~/.xsession /home/runner/.xsession
+          sudo chown runner:runner /home/runner/.xsession
+          sudo adduser xrdp ssl-cert || true
+          sudo systemctl restart xrdp || sudo service xrdp restart
+
+          # Configure X11VNC & noVNC for browser-based desktop access
+          mkdir -p ~/.vnc
+          USER_PASS="${{ inputs.password || 'Cynet@2026' }}"
+          x11vnc -storepasswd "$USER_PASS" ~/.vnc/passwd
+          
+          # Index redirect for noVNC
+          sudo ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html || true
+          
+          # Start virtual display & VNC server
+          Xvfb :1 -screen 0 1920x1080x24 &
+          sleep 2
+          DISPLAY=:1 xfce4-session &
+          sleep 2
+          x11vnc -display :1 -rfbauth ~/.vnc/passwd -rfbport 5900 -forever -shared -bg
+          sleep 1
+          # Launch noVNC web proxy on port 6080
+          websockify --web /usr/share/novnc 6080 localhost:5900 &
+          sleep 2
+
+      - name: 3. Setup Tmate Tunnel (Zero-Auth Web & SSH Shell)
+        if: ${{ inputs.tunnel == 'tmate' }}
+        run: |
+          echo "=== Setting up Tmate ==="
+          sudo apt-get update -y && sudo apt-get install -y tmate
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          
+          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          
+          echo "=================================================="
+          echo ">>> TMATE ZERO-AUTH TERMINAL READY <<<"
+          echo "Web Browser Terminal : $WEB_URL"
+          echo "SSH Command          : $SSH_CMD"
+          echo "=================================================="
+          
+          {
+            echo "### 🐧 Linux VPS Ready (Tmate Zero-Auth)"
+            echo ""
+            echo "- 🌐 **Web Terminal (Direct in Browser, zero software needed)**: [$WEB_URL]($WEB_URL)"
+            echo "- 💻 **SSH Command**: \`$SSH_CMD\`"
+            echo "- 👤 **User**: \`runner\` (Password: \`${{ inputs.password || 'Cynet@2026' }}\`)"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: 4. Setup TryCloudflare Tunnel (Zero-Auth)
+        if: ${{ inputs.tunnel == 'trycloudflare' }}
+        run: |
+          echo "=== Setting up TryCloudflare ==="
+          curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+          chmod +x /tmp/cloudflared
+          
+          if [ "${{ inputs.mode }}" = "gui" ]; then
+            TARGET_URL="http://localhost:6080"
+          else
+            TARGET_URL="tcp://localhost:22"
+          fi
+          
+          /tmp/cloudflared tunnel --url "$TARGET_URL" --no-autoupdate > /tmp/cf.log 2>&1 &
+          
+          TUNNEL_URL=""
+          for i in {1..45}; do
+            sleep 2
+            TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -n 1)
+            if [ -n "$TUNNEL_URL" ]; then break; fi
+          done
+          
+          echo "=================================================="
+          echo ">>> TRYCLOUDFLARE TUNNEL READY <<<"
+          echo "Tunnel URL: $TUNNEL_URL"
+          echo "=================================================="
+          
+          if [ "${{ inputs.mode }}" = "gui" ]; then
+            {
+              echo "### 🐧 Linux Desktop Ready (TryCloudflare)"
+              echo ""
+              echo "- 🌐 **Direct Browser Desktop**: [$TUNNEL_URL]($TUNNEL_URL)"
+              echo "- 🔑 **VNC Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
+              echo "- *Open the link above in any browser, click Connect, enter password to control the XFCE desktop!*"
+            } >> $GITHUB_STEP_SUMMARY
+          else
+            {
+              echo "### 🐧 Linux SSH via TryCloudflare"
+              echo ""
+              echo "- **Tunnel Hostname**: \`$TUNNEL_URL\`"
+              echo "- **Local SSH proxy**: \`cloudflared access tcp --hostname $TUNNEL_URL --url localhost:2222\`"
+              echo "- **Connect via SSH**: \`ssh runner@localhost -p 2222\` (password: \`${{ inputs.password || 'Cynet@2026' }}\`)"
+            } >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: 5. Setup Bore Tunnel (Zero-Auth Direct TCP)
+        if: ${{ inputs.tunnel == 'bore' }}
+        run: |
+          echo "=== Setting up Bore Tunnel ==="
+          curl -sL https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /tmp
+          chmod +x /tmp/bore
+          
+          PORT=22
+          if [ "${{ inputs.mode }}" = "gui" ]; then PORT=3389; fi
+          
+          /tmp/bore local $PORT --to bore.pub > /tmp/bore.log 2>&1 &
+          
+          REMOTE_PORT=""
+          for i in {1..30}; do
+            sleep 2
+            REMOTE_PORT=$(grep -o 'bore.pub:[0-9]*' /tmp/bore.log | head -n 1 | cut -d: -f2)
+            if [ -n "$REMOTE_PORT" ]; then break; fi
+          done
+          
+          echo "=================================================="
+          echo ">>> BORE TUNNEL READY <<<"
+          echo "Host: bore.pub | Port: $REMOTE_PORT"
+          echo "=================================================="
+          
+          {
+            echo "### 🐧 Linux VPS Ready (Bore TCP Tunnel)"
+            echo ""
+            echo "- **Target Host**: \`bore.pub\`"
+            echo "- **Target Port**: \`$REMOTE_PORT\`"
+            if [ "${{ inputs.mode }}" = "gui" ]; then
+              echo "- **Connect via Remote Desktop (RDP)**: Target \`bore.pub:$REMOTE_PORT\`"
+            else
+              echo "- **Connect via SSH**: \`ssh runner@bore.pub -p $REMOTE_PORT\`"
+            fi
+            echo "- **Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: 6. Setup Pinggy Tunnel (Zero-Auth)
+        if: ${{ inputs.tunnel == 'pinggy' }}
+        run: |
+          echo "=== Setting up Pinggy Tunnel ==="
+          PORT=22
+          if [ "${{ inputs.mode }}" = "gui" ]; then PORT=3389; fi
+          
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -N -p 443 -R0:localhost:$PORT tcp@a.pinggy.io > /tmp/pinggy.log 2>&1 &
+          
+          PINGGY_CONN=""
+          for i in {1..30}; do
+            sleep 2
+            PINGGY_CONN=$(grep -o '[a-z0-9.]*\.a\.pinggy\.io:[0-9]*' /tmp/pinggy.log | head -n 1)
+            if [ -n "$PINGGY_CONN" ]; then break; fi
+          done
+          
+          echo "=================================================="
+          echo ">>> PINGGY TUNNEL READY <<<"
+          echo "Connect to: $PINGGY_CONN"
+          echo "=================================================="
+          
+          {
+            echo "### 🐧 Linux VPS Ready (Pinggy Tunnel)"
+            echo ""
+            echo "- **Connection Endpoint**: \`$PINGGY_CONN\`"
+            echo "- **Username**: \`runner\`"
+            echo "- **Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: 7. Setup Tailscale (VPN Mesh with Auth Key)
+        if: ${{ inputs.tunnel == 'tailscale' }}
+        env:
+          TS_KEY: ${{ inputs.tailscale_authkey || secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          echo "=== Setting up Tailscale ==="
+          if [ -z "$TS_KEY" ]; then
+            echo "ERROR: Tailscale AuthKey is required for Tailscale tunnel."
+            exit 1
+          fi
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey="$TS_KEY" --hostname="github-linux-vps" --accept-routes
+          
+          TS_IP=$(tailscale ip -4)
+          echo "=================================================="
+          echo ">>> TAILSCALE VPN READY <<<"
+          echo "Tailscale IP: $TS_IP"
+          echo "=================================================="
+          
+          {
+            echo "### 🐧 Linux VPS Ready (Tailscale VPN)"
+            echo ""
+            echo "- **Tailscale IP**: \`$TS_IP\`"
+            echo "- **SSH**: \`ssh runner@$TS_IP\`"
+            if [ "${{ inputs.mode }}" = "gui" ]; then
+              echo "- **RDP**: Connect to \`$TS_IP:3389\`"
+              echo "- **Browser noVNC**: \`http://$TS_IP:6080\`"
+            fi
+            echo "- **Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: 8. Keep Server Alive (6 Hours max)
+        run: |
+          echo "Server running! Keeping runner alive for up to 6 hours..."
+          for i in {1..360}; do
+            sleep 60
+            echo "[$i/360 min] VPS alive and healthy..."
+          done

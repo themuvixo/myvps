@@ -1,0 +1,107 @@
+name: Windows Cloud RDP (TryCloudflare)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Enable Remote Desktop & Firewall
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+
+      - name: 2. Create Admin Account
+        shell: pwsh
+        run: |
+          $Password = ConvertTo-SecureString "Cynet@2026" -AsPlainText -Force
+          New-LocalUser -Name "CynetAdmin" -Password $Password -PasswordNeverExpires -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member "CynetAdmin" -ErrorAction SilentlyContinue
+          net user runneradmin Cynet@2026
+
+      - name: 3. Download cloudflared
+        shell: pwsh
+        run: |
+          $url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\cloudflared.exe"
+          Write-Host "cloudflared downloaded to $env:RUNNER_TEMP\cloudflared.exe"
+
+      - name: 4. Start TryCloudflare RDP tunnel and keep server alive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $cloudflared = "$env:RUNNER_TEMP\cloudflared.exe"
+          $outLog = "$env:RUNNER_TEMP\cloudflared.out.log"
+          $errLog = "$env:RUNNER_TEMP\cloudflared.err.log"
+
+          Remove-Item $outLog, $errLog -ErrorAction SilentlyContinue
+
+          $proc = Start-Process -FilePath $cloudflared `
+            -ArgumentList "tunnel --url rdp://localhost:3389 --no-autoupdate" `
+            -RedirectStandardOutput $outLog `
+            -RedirectStandardError $errLog `
+            -PassThru -NoNewWindow
+
+          $tunnelUrl = $null
+
+          for ($i = 1; $i -le 60; $i++) {
+            Start-Sleep -Seconds 2
+
+            $text = ""
+            if (Test-Path $outLog) { $text += Get-Content $outLog -Raw }
+            if (Test-Path $errLog) { $text += Get-Content $errLog -Raw }
+
+            if ($text -match 'https://[a-z0-9-]+\.trycloudflare\.com') {
+              $tunnelUrl = $Matches[0]
+              break
+            }
+
+            if ($proc.HasExited) {
+              throw "cloudflared exited early with code $($proc.ExitCode)"
+            }
+          }
+
+          if (-not $tunnelUrl) {
+            Write-Host "cloudflared stdout:"
+            if (Test-Path $outLog) { Get-Content $outLog }
+            Write-Host "cloudflared stderr:"
+            if (Test-Path $errLog) { Get-Content $errLog }
+            throw "Could not parse a trycloudflare.com URL from cloudflared logs."
+          }
+
+          Write-Host ""
+          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host "  >>> RDP SERVER IS READY (TryCloudflare) <<<" -ForegroundColor Cyan
+          Write-Host "  Tunnel URL   : $tunnelUrl" -ForegroundColor Yellow
+          Write-Host "  Username     : CynetAdmin" -ForegroundColor Yellow
+          Write-Host "  Password     : Cynet@2026" -ForegroundColor Yellow
+          Write-Host ""
+          Write-Host "  On your local PC, run:" -ForegroundColor Magenta
+          Write-Host "    cloudflared access rdp --hostname $tunnelUrl --url localhost:13389" -ForegroundColor Magenta
+          Write-Host "  Then open mstsc and connect to: localhost:13389" -ForegroundColor Magenta
+          Write-Host "==================================================" -ForegroundColor Green
+
+          $summary = @(
+            "### RDP via TryCloudflare"
+            ""
+            "- **Tunnel URL**: ``$tunnelUrl``"
+            "- **Username**: ``CynetAdmin``"
+            "- **Password**: ``Cynet@2026``"
+            "- **Local proxy command**: ``cloudflared access rdp --hostname $tunnelUrl --url localhost:13389``"
+            "- **RDP target**: ``localhost:13389``"
+          ) -join "`n"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+          for ($i = 1; $i -le 360; $i++) {
+            if ($proc.HasExited) {
+              throw "cloudflared exited during keep-alive with code $($proc.ExitCode)"
+            }
+            Start-Sleep -Seconds 60
+            Write-Host "[$i/360] Server running..."
+          }

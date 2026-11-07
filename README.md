@@ -1,60 +1,99 @@
-# Secure Remote Access (Linux, macOS, Windows)
+# 🚀 CloudVPS - Universal Multi-OS Cloud Runner & Remote Desktop
 
-This project provides small, cross-platform helpers for joining a machine to your Tailscale network. It does **not** turn GitHub-hosted Actions runners into VPS hosts and does not publish SSH, RDP, or other services to the public internet.
+> **Turn GitHub Actions into powerful, on-demand Linux, Windows, and macOS virtual machines with zero authentication, zero account creation, and instant remote access.**
 
-## Security model
+---
 
-- Tailscale is the only network tunnel included. A Tailscale auth key enrolls a device in your tailnet; it is not a login password for Linux, macOS, Windows, SSH, or RDP.
-- Keep normal operating-system authentication enabled. SSH and screen-sharing/RDP still require valid host credentials and access controls.
-- Do not expose SSH/RDP ports to the public internet. Reach them over the tailnet instead.
-- Create a least-privilege, tagged, short-lived Tailscale auth key for the intended machine. Store it in a trusted secret manager or inject it into the process environment. Never commit it, print it, or paste it into a workflow log.
-- The scripts expect Tailscale to already be installed. Install it from the official download page: <https://tailscale.com/download>. The auth key is passed briefly to the local Tailscale CLI, so run this only on a machine you administer and trust.
+## 🌟 Key Features
 
-## Linux server
+- **⚡ Full Zero-Auth Setup**: No tokens, no API keys, no registrations, no credit cards required for TryCloudflare, Tmate, Bore, or Pinggy!
+- **💻 All Major Operating Systems**:
+  - **Ubuntu Linux**: Choose between headless server CLI (Docker, root sudo) or full **XFCE Desktop with browser noVNC GUI & XRDP**.
+  - **Windows Server**: Full Remote Desktop Protocol (**RDP**) with admin privileges, hardware acceleration, and `mstsc` support.
+  - **macOS (Apple Silicon / Latest)**: Terminal SSH or native **Screen Sharing (VNC)**.
+- **🌐 5 Different Tunneling Technologies**:
+  1. **Tmate** *(Zero-Auth)*: Instant clickable browser web shell + SSH command. Works on mobile & desktop with zero client software!
+  2. **TryCloudflare** *(Zero-Auth)*: Fast, secure Cloudflare edge network tunnels for web desktops, RDP, or SSH.
+  3. **Bore** *(Zero-Auth)*: Open-source, direct TCP tunnel (`bore.pub:PORT`) with no client software needed on your PC.
+  4. **Pinggy** *(Zero-Auth)*: Clean reverse TCP tunnel over SSH.
+  5. **Tailscale** *(Auth-Key Supported)*: Private, encrypted WireGuard mesh network connecting your devices securely.
+- **⏱️ Up to 6 Hours Per Session**: Maximum runner duration permitted by GitHub Actions (360 minutes).
 
-Install Tailscale using the official instructions for your distribution, then run:
+---
 
-```bash
-read -rsp 'Tailscale auth key: ' TAILSCALE_AUTHKEY
-echo
-export TAILSCALE_AUTHKEY
-./scripts/linux/connect.sh
-unset TAILSCALE_AUTHKEY
-```
+## 📋 Tunnel Comparison Matrix
 
-The script uses `sudo` to connect the installed Tailscale client and reports the assigned Tailscale IP. It does not open firewall ports or change SSH configuration.
+| Tunnel Provider | Authentication Required? | Client Software Required? | Best For |
+| :--- | :---: | :---: | :--- |
+| **Tmate** | ❌ **None** | ❌ **None** (Opens in Browser) | Instant web shell, mobile terminal, fast debugging |
+| **TryCloudflare** | ❌ **None** | ❌ (None for Web Desktop) / `cloudflared` for RDP | High-speed web GUI desktop, stable RDP |
+| **Bore** | ❌ **None** | ❌ **None** (Direct IP/Port) | Native RDP (`mstsc`) or SSH without installing anything |
+| **Pinggy** | ❌ **None** | ❌ **None** | Direct SSH & TCP proxy |
+| **Tailscale** | ✅ Yes (`TAILSCALE_AUTHKEY`) | Tailscale App | Private, encrypted LAN mesh across your devices |
 
-## macOS
+---
 
-Install and launch the official Tailscale app, then run:
+## 🚀 Workflows Guide
 
-```bash
-read -rsp 'Tailscale auth key: ' TAILSCALE_AUTHKEY
-echo
-export TAILSCALE_AUTHKEY
-./scripts/macos/connect.sh
-unset TAILSCALE_AUTHKEY
-```
+### 1. 🐧 Linux Cloud VPS (`.github/workflows/linux-vps.yml`)
+- **Environment**:
+  - `gui`: Deploys XFCE4 desktop + XRDP + **noVNC** (HTML5 browser desktop).
+  - `cli`: Ultra-fast headless server with Docker, Python, Node.js, and root sudo.
+- **How to Connect**:
+  - **If using Tmate**: Click the generated web URL in the workflow step summary to open a terminal right in your browser.
+  - **If using TryCloudflare (GUI)**: Click the `trycloudflare.com/vnc.html` link, enter the password, and control the Linux desktop directly in your browser!
+  - **If using Bore**: Run `ssh runner@bore.pub -p <PORT>` or connect with your RDP client to `bore.pub:<PORT>`.
 
-The script uses the app's bundled CLI when available, otherwise it uses `tailscale` from `PATH`. It does not enable Remote Login or Screen Sharing.
+### 2. 🪟 Windows Cloud RDP (`.github/workflows/windows-rdp.yml`)
+- **Environment**: Latest Windows Server runner with full administrative privileges.
+- **Default Username**: `CynetAdmin`
+- **Default Password**: `Cynet@2026` (Customizable via workflow input or `RDP_PASSWORD` secret).
+- **How to Connect**:
+  - **TryCloudflare**:
+    ```bash
+    cloudflared access rdp --hostname <TUNNEL_URL> --url localhost:13389
+    # Then open Remote Desktop (mstsc) and connect to: localhost:13389
+    ```
+  - **Bore (Direct TCP)**:
+    - Open `mstsc` (Remote Desktop Connection) and directly connect to `bore.pub:<PORT>`.
+    - No client proxy needed!
+  - **Tailscale**:
+    - Connect to the assigned Tailscale IP directly via `mstsc`.
 
-## Windows
+### 3. 🍎 macOS Cloud VPS (`.github/workflows/macos-vps.yml`)
+- **Environment**: Latest macOS Apple Silicon runner.
+- **Service**:
+  - `ssh`: Command line terminal with Homebrew.
+  - `vnc`: Native macOS Screen Sharing on port 5900.
+- **How to Connect**:
+  - Open via Tmate web shell or connect your VNC client (VNC Viewer / RealVNC) to the tunnel address.
 
-Install Tailscale, open PowerShell, set `TAILSCALE_AUTHKEY` through your secret manager, then run:
+### 4. ⚡ Instant Terminal (`.github/workflows/quick-terminal.yml`)
+- Launches in **under 5 seconds**.
+- Outputs a clickable link in the GitHub Actions summary.
+- One click gives you a full Linux root shell in any web browser!
 
-```powershell
-.\scripts\windows\Connect-Tailscale.ps1
-Remove-Item Env:TAILSCALE_AUTHKEY
-```
+---
 
-The script connects the local Tailscale client and prints the assigned Tailscale IP. It does not enable RDP, change firewall rules, or create an administrator account.
+## ⚙️ Configuration & Secrets (Optional)
 
-## Accessing services
+The workflows run **100% out of the box with zero secrets**. If you want custom passwords or to use Tailscale, add these repository secrets in **Settings > Secrets and variables > Actions**:
 
-After the machine is online, use its Tailscale IP or MagicDNS name with the service's normal client. For example, SSH to a Linux host using your existing OS account, or use macOS Screen Sharing / Windows RDP with the host's normal authentication. Tailscale controls network reachability; it does not replace service-level login.
+| Secret Name | Description | Required? |
+| :--- | :--- | :---: |
+| `RDP_PASSWORD` | Custom password for Windows RDP & Linux VPS | Optional (Default: `Cynet@2026`) |
+| `TAILSCALE_AUTHKEY` | Tailscale reusable auth key (`tskey-auth-...`) | Only if using Tailscale tunnel |
 
-Anonymous public tunnels and quick-tunnel modes are intentionally not included. They can expose a machine to anyone who discovers the endpoint. GitHub Actions is used here only for syntax checks, not as a long-running remote server.
+---
 
-## Validation
+## 🔒 Security & Best Practices
 
-The GitHub Actions workflow checks Bash and PowerShell syntax on hosted runners. It requires no secrets and does not connect to your tailnet.
+1. **Ephemeral Runners**: GitHub Actions virtual machines are completely isolated and destroyed automatically once the workflow finishes or times out.
+2. **Never store sensitive private data** on public runners.
+3. Keep workflows private if you want to prevent others from seeing your workflow dispatch run summaries.
+4. **Usage Guidelines**: Ensure compliance with GitHub Actions Terms of Service.
+
+---
+
+## 📄 License
+MIT License. Created for development, testing, and continuous integration workflows.

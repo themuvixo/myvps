@@ -1,0 +1,250 @@
+name: Windows Cloud RDP (Universal)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tunnel:
+        description: 'Tunnel Provider (Zero-Auth except Tailscale)'
+        required: true
+        default: 'trycloudflare'
+        type: choice
+        options:
+          - 'trycloudflare'
+          - 'bore'
+          - 'pinggy'
+          - 'tailscale'
+      admin_password:
+        description: 'Admin Password (default: Cynet@2026)'
+        required: false
+        default: 'Cynet@2026'
+        type: string
+      tailscale_authkey:
+        description: 'Tailscale Auth Key (Only needed if tunnel is tailscale)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  windows-rdp:
+    name: Run Windows RDP (${{ inputs.tunnel }})
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Enable Remote Desktop & Configure Firewall
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+
+      - name: 2. Create Administrator Account
+        shell: pwsh
+        run: |
+          $rawPass = "${{ inputs.admin_password }}"
+          if ([string]::IsNullOrWhiteSpace($rawPass)) { $rawPass = "${{ secrets.RDP_PASSWORD }}" }
+          if ([string]::IsNullOrWhiteSpace($rawPass)) { $rawPass = "Cynet@2026" }
+
+          $Password = ConvertTo-SecureString $rawPass -AsPlainText -Force
+          New-LocalUser -Name "CynetAdmin" -Password $Password -PasswordNeverExpires -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member "CynetAdmin" -ErrorAction SilentlyContinue
+          net user runneradmin $rawPass
+          Write-Host "Admin account CynetAdmin configured successfully."
+
+      - name: 3. TryCloudflare Tunnel (Zero-Auth)
+        if: ${{ inputs.tunnel == 'trycloudflare' }}
+        shell: pwsh
+        run: |
+          $url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\cloudflared.exe"
+
+          $cloudflared = "$env:RUNNER_TEMP\cloudflared.exe"
+          $outLog = "$env:RUNNER_TEMP\cloudflared.out.log"
+          $errLog = "$env:RUNNER_TEMP\cloudflared.err.log"
+          Remove-Item $outLog, $errLog -ErrorAction SilentlyContinue
+
+          $proc = Start-Process -FilePath $cloudflared `
+            -ArgumentList "tunnel --url rdp://localhost:3389 --no-autoupdate" `
+            -RedirectStandardOutput $outLog `
+            -RedirectStandardError $errLog `
+            -PassThru -NoNewWindow
+
+          $tunnelUrl = $null
+          for ($i = 1; $i -le 45; $i++) {
+            Start-Sleep -Seconds 2
+            $text = ""
+            if (Test-Path $outLog) { $text += Get-Content $outLog -Raw }
+            if (Test-Path $errLog) { $text += Get-Content $errLog -Raw }
+
+            if ($text -match 'https://[a-z0-9-]+\.trycloudflare\.com') {
+              $tunnelUrl = $Matches[0]
+              break
+            }
+          }
+
+          if (-not $tunnelUrl) { throw "Could not obtain trycloudflare.com URL." }
+
+          $pass = "${{ inputs.admin_password || secrets.RDP_PASSWORD || 'Cynet@2026' }}"
+          Write-Host ""
+          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host "  >>> WINDOWS RDP READY (TryCloudflare) <<<" -ForegroundColor Cyan
+          Write-Host "  Tunnel URL   : $tunnelUrl" -ForegroundColor Yellow
+          Write-Host "  Username     : CynetAdmin" -ForegroundColor Yellow
+          Write-Host "  Password     : $pass" -ForegroundColor Yellow
+          Write-Host ""
+          Write-Host "  On your local machine, run:" -ForegroundColor Magenta
+          Write-Host "    cloudflared access rdp --hostname $tunnelUrl --url localhost:13389" -ForegroundColor Magenta
+          Write-Host "  Then connect via Remote Desktop (mstsc) to: localhost:13389" -ForegroundColor Magenta
+          Write-Host "==================================================" -ForegroundColor Green
+
+          $summary = @(
+            "### Windows RDP Ready (TryCloudflare)"
+            ""
+            "- **Tunnel URL**: ``$tunnelUrl``"
+            "- **Username**: ``CynetAdmin``"
+            "- **Password**: ``$pass``"
+            "- **Local Proxy Command**: ``cloudflared access rdp --hostname $tunnelUrl --url localhost:13389``"
+            "- **RDP Connection Target**: ``localhost:13389``"
+          ) -join "`n"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+      - name: 4. Bore Tunnel (Zero-Auth Direct TCP)
+        if: ${{ inputs.tunnel == 'bore' }}
+        shell: pwsh
+        run: |
+          $zipUrl = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest -Uri $zipUrl -OutFile "$env:RUNNER_TEMP\bore.zip"
+          Expand-Archive -Path "$env:RUNNER_TEMP\bore.zip" -DestinationPath "$env:RUNNER_TEMP" -Force
+          $bore = "$env:RUNNER_TEMP\bore.exe"
+
+          $boreLog = "$env:RUNNER_TEMP\bore.log"
+          $proc = Start-Process -FilePath $bore `
+            -ArgumentList "local 3389 --to bore.pub" `
+            -RedirectStandardOutput $boreLog `
+            -RedirectStandardError $boreLog `
+            -PassThru -NoNewWindow
+
+          $remotePort = $null
+          for ($i = 1; $i -le 30; $i++) {
+            Start-Sleep -Seconds 2
+            if (Test-Path $boreLog) {
+              $text = Get-Content $boreLog -Raw
+              if ($text -match 'bore\.pub:(\d+)') {
+                $remotePort = $Matches[1]
+                break
+              }
+            }
+          }
+
+          if (-not $remotePort) { throw "Could not obtain Bore remote port." }
+
+          $pass = "${{ inputs.admin_password || secrets.RDP_PASSWORD || 'Cynet@2026' }}"
+          Write-Host ""
+          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host "  >>> WINDOWS RDP READY (Bore Direct TCP) <<<" -ForegroundColor Cyan
+          Write-Host "  Connect to   : bore.pub:$remotePort" -ForegroundColor Yellow
+          Write-Host "  Username     : CynetAdmin" -ForegroundColor Yellow
+          Write-Host "  Password     : $pass" -ForegroundColor Yellow
+          Write-Host "  (No local client needed! Open mstsc and connect to bore.pub:$remotePort directly)" -ForegroundColor Magenta
+          Write-Host "==================================================" -ForegroundColor Green
+
+          $summary = @(
+            "### Windows RDP Ready (Bore Direct TCP)"
+            ""
+            "- **RDP Target Address**: ``bore.pub:$remotePort``"
+            "- **Username**: ``CynetAdmin``"
+            "- **Password**: ``$pass``"
+            "- *Direct connection: No client software or account required!*"
+          ) -join "`n"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+      - name: 5. Pinggy Tunnel (Zero-Auth)
+        if: ${{ inputs.tunnel == 'pinggy' }}
+        shell: pwsh
+        run: |
+          $pinggyLog = "$env:RUNNER_TEMP\pinggy.log"
+          $sshCmd = "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ServerAliveInterval=30 -N -p 443 -R0:localhost:3389 tcp@a.pinggy.io"
+          
+          Start-Process powershell -ArgumentList "-NoProfile -Command $sshCmd *> $pinggyLog" -NoNewWindow
+          
+          $endpoint = $null
+          for ($i = 1; $i -le 30; $i++) {
+            Start-Sleep -Seconds 2
+            if (Test-Path $pinggyLog) {
+              $text = Get-Content $pinggyLog -Raw
+              if ($text -match '([a-z0-9.]+\.a\.pinggy\.io:\d+)') {
+                $endpoint = $Matches[1]
+                break
+              }
+            }
+          }
+
+          $pass = "${{ inputs.admin_password || secrets.RDP_PASSWORD || 'Cynet@2026' }}"
+          Write-Host ""
+          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host "  >>> WINDOWS RDP READY (Pinggy) <<<" -ForegroundColor Cyan
+          Write-Host "  Endpoint : $endpoint" -ForegroundColor Yellow
+          Write-Host "  Username : CynetAdmin" -ForegroundColor Yellow
+          Write-Host "  Password : $pass" -ForegroundColor Yellow
+          Write-Host "==================================================" -ForegroundColor Green
+
+          $summary = @(
+            "### Windows RDP Ready (Pinggy)"
+            ""
+            "- **RDP Target**: ``$endpoint``"
+            "- **Username**: ``CynetAdmin``"
+            "- **Password**: ``$pass``"
+          ) -join "`n"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+      - name: 6. Tailscale (VPN Mesh with Auth Key)
+        if: ${{ inputs.tunnel == 'tailscale' }}
+        shell: pwsh
+        env:
+          TS_KEY: ${{ inputs.tailscale_authkey || secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TS_KEY)) { throw "Tailscale AuthKey is required." }
+
+          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "C:\tailscale.msi"
+          Start-Process msiexec -ArgumentList "/i C:\tailscale.msi /quiet /norestart" -Wait
+          Start-Sleep -Seconds 8
+
+          $ts = "C:\Program Files\Tailscale\tailscale.exe"
+          & $ts up --authkey="$env:TS_KEY" --hostname="github-windows-rdp" --unattended
+
+          $ts_ip = $null
+          for ($i = 0; $i -lt 30; $i++) {
+            $ts_ip = & $ts ip -4 2>$null
+            if ($ts_ip) { break }
+            Start-Sleep -Seconds 2
+          }
+
+          if (-not $ts_ip) { throw "No Tailscale IPv4 address assigned." }
+
+          $pass = "${{ inputs.admin_password || secrets.RDP_PASSWORD || 'Cynet@2026' }}"
+          Write-Host ""
+          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host "  >>> WINDOWS RDP READY (Tailscale) <<<" -ForegroundColor Cyan
+          Write-Host "  Tailscale IP : $ts_ip" -ForegroundColor Yellow
+          Write-Host "  Username     : CynetAdmin" -ForegroundColor Yellow
+          Write-Host "  Password     : $pass" -ForegroundColor Yellow
+          Write-Host "  Connect via mstsc to: $ts_ip" -ForegroundColor Magenta
+          Write-Host "==================================================" -ForegroundColor Green
+
+          $summary = @(
+            "### Windows RDP Ready (Tailscale VPN)"
+            ""
+            "- **Tailscale IP**: ``$ts_ip``"
+            "- **Username**: ``CynetAdmin``"
+            "- **Password**: ``$pass``"
+            "- **Connect via RDP**: ``mstsc -> $ts_ip``"
+          ) -join "`n"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+      - name: 7. Keep Server Alive (6 Hours max)
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 360; $i++) {
+            Start-Sleep -Seconds 60
+            Write-Host "[$i/360 min] Server running..."
+          }

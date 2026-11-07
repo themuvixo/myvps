@@ -1,0 +1,83 @@
+name: Windows Cloud RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Enable Remote Desktop & Firewall
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+
+      - name: 2. Create Admin Account
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) { throw "RDP_PASSWORD secret is missing or empty." }
+
+          $Password = ConvertTo-SecureString "$env:RDP_PASSWORD" -AsPlainText -Force
+
+          New-LocalUser -Name "CynetAdmin" -Password $Password -PasswordNeverExpires -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member "CynetAdmin" -ErrorAction SilentlyContinue
+
+          # Reset the existing runneradmin password to the same secret
+          Set-LocalUser -Name "runneradmin" -Password $Password -ErrorAction SilentlyContinue
+
+      - name: 3a. Diagnostic - Check Tailscale secret presence
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTHKEY)) {
+            Write-Host "SECRET IS EMPTY OR MISSING" -ForegroundColor Red
+          } else {
+            Write-Host "SECRET IS PRESENT (length: $($env:TAILSCALE_AUTHKEY.Length))" -ForegroundColor Green
+          }
+
+      - name: 3b. Install & Connect Tailscale VPN
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTHKEY)) { throw "TAILSCALE_AUTHKEY secret is missing or empty." }
+
+          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "C:\tailscale.msi"
+          Start-Process msiexec -ArgumentList "/i C:\tailscale.msi /quiet /norestart" -Wait
+
+          Start-Sleep -Seconds 10
+
+          $ts = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $ts)) { throw "Tailscale executable not found at $ts" }
+
+          & $ts up --authkey="$env:TAILSCALE_AUTHKEY" --hostname="github-rdp-server" --unattended
+          if ($LASTEXITCODE -ne 0) { throw "tailscale up failed with exit code $LASTEXITCODE" }
+
+          # Wait for an IPv4 address to be assigned
+          $ts_ip = $null
+          for ($i = 0; $i -lt 30; $i++) {
+            $ts_ip = & $ts ip -4 2>$null
+            if ($ts_ip) { break }
+            Start-Sleep -Seconds 2
+          }
+
+          if (-not $ts_ip) { throw "No Tailscale IPv4 address was assigned." }
+
+          Write-Host ""
+          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host "  >>> RDP SERVER IS READY! <<<" -ForegroundColor Cyan
+          Write-Host "  Tailscale IP : $ts_ip" -ForegroundColor Yellow
+          Write-Host "  Username     : CynetAdmin" -ForegroundColor Yellow
+          Write-Host "  Password     : [use the RDP_PASSWORD secret]" -ForegroundColor Yellow
+          Write-Host "  >> Open mstsc and connect to: $ts_ip" -ForegroundColor Magenta
+          Write-Host "==================================================" -ForegroundColor Green
+
+      - name: 4. Keep Server Alive (6 Hours)
+        run: |
+          for ($i = 1; $i -le 360; $i++) {
+            Start-Sleep -Seconds 60
+            Write-Host "[$i/360] Server running..."
+          }

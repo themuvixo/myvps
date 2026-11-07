@@ -1,0 +1,41 @@
+name: Quick Instant Terminal (Zero-Auth, 5 Seconds)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  terminal:
+    name: Instant Web Terminal
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Launch Tmate Web Terminal
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y tmate
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+
+          WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+
+          echo "=================================================="
+          echo ">>> INSTANT ROOT WEB TERMINAL READY <<<"
+          echo "Click to open in browser: $WEB_URL"
+          echo "SSH command             : $SSH_CMD"
+          echo "=================================================="
+
+          {
+            echo "## Instant Cloud Terminal Ready!"
+            echo ""
+            echo "### [Click here to open Web Terminal in Browser]($WEB_URL)"
+            echo ""
+            echo "- **Direct Browser Link**: \`$WEB_URL\`"
+            echo "- **Direct SSH Command**: \`$SSH_CMD\`"
+            echo "- *Zero software, zero accounts, zero configuration needed! Works on mobile and desktop.*"
+          } >> $GITHUB_STEP_SUMMARY
+
+          for i in {1..360}; do
+            sleep 60
+            echo "[$i/360 min] Terminal session active..."
+          done

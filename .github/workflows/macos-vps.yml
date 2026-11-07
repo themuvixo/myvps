@@ -1,0 +1,228 @@
+name: macOS Cloud VPS (Universal)
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Target Service'
+        required: true
+        default: 'ssh'
+        type: choice
+        options:
+          - 'ssh'
+          - 'vnc'
+      tunnel:
+        description: 'Tunnel Provider (Zero-Auth except Tailscale)'
+        required: true
+        default: 'tmate'
+        type: choice
+        options:
+          - 'tmate'
+          - 'trycloudflare'
+          - 'bore'
+          - 'pinggy'
+          - 'tailscale'
+      password:
+        description: 'User & VNC Password (default: Cynet@2026)'
+        required: false
+        default: 'Cynet@2026'
+        type: string
+      tailscale_authkey:
+        description: 'Tailscale Auth Key (Only needed if tunnel is tailscale)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  macos-vps:
+    name: macOS VPS (${{ inputs.service }} / ${{ inputs.tunnel }})
+    runs-on: macos-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. System Setup & Password Configuration
+        run: |
+          USER_PASS="${{ inputs.password || 'Cynet@2026' }}"
+          sudo dscl . -passwd /Users/runner "$USER_PASS" || true
+          echo "runner password configured."
+          
+          # Enable SSH Remote Login
+          sudo systemsetup -setremotelogin on || true
+
+      - name: 2. Enable macOS Screen Sharing / VNC (If VNC selected)
+        if: ${{ inputs.service == 'vnc' }}
+        run: |
+          USER_PASS="${{ inputs.password || 'Cynet@2026' }}"
+          echo "=== Configuring macOS Screen Sharing (VNC port 5900) ==="
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          
+          # Configure kickstart with VNC legacy password support
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on -clientopts -setvnclegacy -vnclegacy yes \
+            -setvncpw -vncpw "$USER_PASS" -restart -agent -privs -all || true
+          
+          echo "Screen Sharing enabled on port 5900."
+
+      - name: 3. Tmate Tunnel (Zero-Auth Web & SSH Shell)
+        if: ${{ inputs.tunnel == 'tmate' }}
+        run: |
+          echo "=== Setting up Tmate on macOS ==="
+          brew install tmate
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          
+          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          
+          echo "=================================================="
+          echo ">>> TMATE ZERO-AUTH MACOS SHELL READY <<<"
+          echo "Web Browser Terminal : $WEB_URL"
+          echo "SSH Command          : $SSH_CMD"
+          echo "=================================================="
+          
+          {
+            echo "### 🍎 macOS VPS Ready (Tmate Zero-Auth)"
+            echo ""
+            echo "- 🌐 **Web Browser Terminal (instant, zero install)**: [$WEB_URL]($WEB_URL)"
+            echo "- 💻 **SSH Command**: \`$SSH_CMD\`"
+            echo "- 👤 **User**: \`runner\` (Password: \`${{ inputs.password || 'Cynet@2026' }}\`)"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: 4. TryCloudflare Tunnel (Zero-Auth)
+        if: ${{ inputs.tunnel == 'trycloudflare' }}
+        run: |
+          echo "=== Setting up TryCloudflare on macOS ==="
+          brew install cloudflare/cloudflare/cloudflared
+          
+          PORT=22
+          if [ "${{ inputs.service }}" = "vnc" ]; then PORT=5900; fi
+          
+          cloudflared tunnel --url "tcp://localhost:$PORT" --no-autoupdate > /tmp/cf.log 2>&1 &
+          
+          TUNNEL_URL=""
+          for i in {1..45}; do
+            sleep 2
+            TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -n 1)
+            if [ -n "$TUNNEL_URL" ]; then break; fi
+          done
+          
+          echo "=================================================="
+          echo ">>> TRYCLOUDFLARE MACOS TUNNEL READY <<<"
+          echo "Tunnel URL: $TUNNEL_URL"
+          echo "=================================================="
+          
+          {
+            echo "### 🍎 macOS Ready (TryCloudflare)"
+            echo ""
+            echo "- **Tunnel Hostname**: \`$TUNNEL_URL\`"
+            if [ "${{ inputs.service }}" = "vnc" ]; then
+              echo "- **Local VNC Proxy Command**: \`cloudflared access tcp --hostname $TUNNEL_URL --url localhost:15900\`"
+              echo "- **Connect with VNC Viewer**: \`localhost:15900\` (Password: \`${{ inputs.password || 'Cynet@2026' }}\`)"
+            else
+              echo "- **Local SSH Proxy Command**: \`cloudflared access tcp --hostname $TUNNEL_URL --url localhost:2222\`"
+              echo "- **Connect with SSH**: \`ssh runner@localhost -p 2222\` (Password: \`${{ inputs.password || 'Cynet@2026' }}\`)"
+            fi
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: 5. Bore Tunnel (Zero-Auth Direct TCP)
+        if: ${{ inputs.tunnel == 'bore' }}
+        run: |
+          echo "=== Setting up Bore Tunnel on macOS ==="
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "arm64" ]; then
+            BORE_PKG="bore-v0.5.2-aarch64-apple-darwin.tar.gz"
+          else
+            BORE_PKG="bore-v0.5.2-x86_64-apple-darwin.tar.gz"
+          fi
+          
+          curl -sL "https://github.com/ekzhang/bore/releases/download/v0.5.2/$BORE_PKG" | tar -xz -C /tmp
+          chmod +x /tmp/bore
+          
+          PORT=22
+          if [ "${{ inputs.service }}" = "vnc" ]; then PORT=5900; fi
+          
+          /tmp/bore local $PORT --to bore.pub > /tmp/bore.log 2>&1 &
+          
+          REMOTE_PORT=""
+          for i in {1..30}; do
+            sleep 2
+            REMOTE_PORT=$(grep -o 'bore.pub:[0-9]*' /tmp/bore.log | head -n 1 | cut -d: -f2)
+            if [ -n "$REMOTE_PORT" ]; then break; fi
+          done
+          
+          echo "=================================================="
+          echo ">>> BORE TUNNEL READY <<<"
+          echo "Host: bore.pub | Port: $REMOTE_PORT"
+          echo "=================================================="
+          
+          {
+            echo "### 🍎 macOS VPS Ready (Bore Direct TCP)"
+            echo ""
+            echo "- **Endpoint**: \`bore.pub:$REMOTE_PORT\`"
+            if [ "${{ inputs.service }}" = "vnc" ]; then
+              echo "- **Connect with VNC Viewer**: \`bore.pub:$REMOTE_PORT\`"
+            else
+              echo "- **Connect with SSH**: \`ssh runner@bore.pub -p $REMOTE_PORT\`"
+            fi
+            echo "- **Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: 6. Pinggy Tunnel (Zero-Auth)
+        if: ${{ inputs.tunnel == 'pinggy' }}
+        run: |
+          echo "=== Setting up Pinggy Tunnel on macOS ==="
+          PORT=22
+          if [ "${{ inputs.service }}" = "vnc" ]; then PORT=5900; fi
+          
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -N -p 443 -R0:localhost:$PORT tcp@a.pinggy.io > /tmp/pinggy.log 2>&1 &
+          
+          PINGGY_CONN=""
+          for i in {1..30}; do
+            sleep 2
+            PINGGY_CONN=$(grep -o '[a-z0-9.]*\.a\.pinggy\.io:[0-9]*' /tmp/pinggy.log | head -n 1)
+            if [ -n "$PINGGY_CONN" ]; then break; fi
+          done
+          
+          {
+            echo "### 🍎 macOS Ready (Pinggy Tunnel)"
+            echo ""
+            echo "- **Endpoint**: \`$PINGGY_CONN\`"
+            echo "- **User**: \`runner\`"
+            echo "- **Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: 7. Tailscale (VPN Mesh with Auth Key)
+        if: ${{ inputs.tunnel == 'tailscale' }}
+        env:
+          TS_KEY: ${{ inputs.tailscale_authkey || secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          if [ -z "$TS_KEY" ]; then
+            echo "ERROR: Tailscale AuthKey is required."
+            exit 1
+          fi
+          brew install tailscale
+          sudo tailscaled install-system-daemon || sudo tailscaled &
+          sleep 5
+          sudo tailscale up --authkey="$TS_KEY" --hostname="github-macos-vps"
+          
+          TS_IP=$(tailscale ip -4)
+          echo "Tailscale IP: $TS_IP"
+          
+          {
+            echo "### 🍎 macOS Ready (Tailscale VPN)"
+            echo ""
+            echo "- **Tailscale IP**: \`$TS_IP\`"
+            echo "- **SSH**: \`ssh runner@$TS_IP\`"
+            if [ "${{ inputs.service }}" = "vnc" ]; then
+              echo "- **VNC**: \`vnc://$TS_IP:5900\`"
+            fi
+            echo "- **Password**: \`${{ inputs.password || 'Cynet@2026' }}\`"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: 8. Keep Alive (6 Hours max)
+        run: |
+          for i in {1..360}; do
+            sleep 60
+            echo "[$i/360 min] macOS runner running..."
+          done
