@@ -87,30 +87,12 @@ jobs:
           websockify --web /usr/share/novnc 6080 localhost:5900 &
           sleep 2
 
-      - name: 3. Setup Tmate Tunnel (Zero-Auth Web & SSH Shell)
+      - name: 3. Setup Tmate Session (Instant Web & SSH Terminal)
         if: ${{ inputs.tunnel == 'tmate' }}
-        run: |
-          echo "=== Setting up Tmate ==="
-          sudo apt-get update -y && sudo apt-get install -y tmate
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          
-          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          
-          echo "=================================================="
-          echo ">>> TMATE ZERO-AUTH TERMINAL READY <<<"
-          echo "Web Browser Terminal : $WEB_URL"
-          echo "SSH Command          : $SSH_CMD"
-          echo "=================================================="
-          
-          {
-            echo "### 🐧 Linux VPS Ready (Tmate Zero-Auth)"
-            echo ""
-            echo "- 🌐 **Web Terminal (Direct in Browser, zero software needed)**: [$WEB_URL]($WEB_URL)"
-            echo "- 💻 **SSH Command**: \`$SSH_CMD\`"
-            echo "- 👤 **User**: \`runner\` (Password: \`${{ inputs.password || 'Cynet@2026' }}\`)"
-          } >> $GITHUB_STEP_SUMMARY
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+          limit-access-to-actor: false
 
       - name: 4. Setup TryCloudflare Tunnel (Zero-Auth)
         if: ${{ inputs.tunnel == 'trycloudflare' }}
@@ -133,6 +115,12 @@ jobs:
             TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -n 1)
             if [ -n "$TUNNEL_URL" ]; then break; fi
           done
+          
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "Cloudflare logs:"
+            cat /tmp/cf.log
+            exit 1
+          fi
           
           echo "=================================================="
           echo ">>> TRYCLOUDFLARE TUNNEL READY <<<"

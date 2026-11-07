@@ -1,40 +1,110 @@
-name: Quick Instant Terminal (Zero-Auth, 5 Seconds)
+name: Quick Instant Terminal (Zero-Auth)
 
 on:
   workflow_dispatch:
+    inputs:
+      tunnel:
+        description: 'Tunnel Provider'
+        required: true
+        default: 'tmate'
+        type: choice
+        options:
+          - 'tmate'
+          - 'trycloudflare'
+          - 'bore'
 
 jobs:
   terminal:
-    name: Instant Web Terminal
+    name: Instant Terminal (${{ inputs.tunnel }})
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-      - name: Launch Tmate Web Terminal
+      - name: Setup Tmate (Battle-tested Instant Web & SSH Terminal)
+        if: ${{ inputs.tunnel == 'tmate' }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: false
+          limit-access-to-actor: false
+
+      - name: Setup TryCloudflare Web Terminal
+        if: ${{ inputs.tunnel == 'trycloudflare' }}
         run: |
-          sudo apt-get update -y && sudo apt-get install -y tmate
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-
-          WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-
+          echo "=== Installing ttyd & cloudflared ==="
+          sudo apt-get update -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ttyd
+          curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+          chmod +x /tmp/cloudflared
+          
+          # Start ttyd web terminal on port 7681 with root bash
+          sudo ttyd -p 7681 -W bash &
+          sleep 2
+          
+          /tmp/cloudflared tunnel --url http://localhost:7681 --no-autoupdate > /tmp/cf.log 2>&1 &
+          
+          TUNNEL_URL=""
+          for i in {1..40}; do
+            sleep 2
+            TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -n 1)
+            if [ -n "$TUNNEL_URL" ]; then break; fi
+          done
+          
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "Cloudflare logs:"
+            cat /tmp/cf.log
+            exit 1
+          fi
+          
           echo "=================================================="
-          echo ">>> INSTANT ROOT WEB TERMINAL READY <<<"
-          echo "Click to open in browser: $WEB_URL"
-          echo "SSH command             : $SSH_CMD"
+          echo ">>> INSTANT WEB TERMINAL READY (TryCloudflare) <<<"
+          echo "Open in browser: $TUNNEL_URL"
           echo "=================================================="
-
+          
           {
-            echo "## Instant Cloud Terminal Ready!"
+            echo "## ⚡ Instant Web Terminal Ready!"
             echo ""
-            echo "### [Click here to open Web Terminal in Browser]($WEB_URL)"
+            echo "### 🌐 [Click here to open Web Terminal in Browser]($TUNNEL_URL)"
             echo ""
-            echo "- **Direct Browser Link**: \`$WEB_URL\`"
-            echo "- **Direct SSH Command**: \`$SSH_CMD\`"
-            echo "- *Zero software, zero accounts, zero configuration needed! Works on mobile and desktop.*"
+            echo "- **Direct URL**: \`$TUNNEL_URL\`"
+            echo "- *Zero software, zero accounts, full root access in browser.*"
           } >> $GITHUB_STEP_SUMMARY
+          
+          for i in {1..360}; do
+            sleep 60
+            echo "[$i/360 min] Terminal session active..."
+          done
 
+      - name: Setup Bore Direct SSH Terminal
+        if: ${{ inputs.tunnel == 'bore' }}
+        run: |
+          echo "=== Setting up Bore Tunnel ==="
+          curl -sL https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /tmp
+          chmod +x /tmp/bore
+          
+          echo "runner:Cynet@2026" | sudo chpasswd
+          sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh || sudo service ssh restart
+          
+          /tmp/bore local 22 --to bore.pub > /tmp/bore.log 2>&1 &
+          
+          REMOTE_PORT=""
+          for i in {1..30}; do
+            sleep 2
+            REMOTE_PORT=$(grep -o 'bore.pub:[0-9]*' /tmp/bore.log | head -n 1 | cut -d: -f2)
+            if [ -n "$REMOTE_PORT" ]; then break; fi
+          done
+          
+          echo "=================================================="
+          echo ">>> BORE SSH READY <<<"
+          echo "Connect: ssh runner@bore.pub -p $REMOTE_PORT"
+          echo "Password: Cynet@2026"
+          echo "=================================================="
+          
+          {
+            echo "## ⚡ Bore SSH Ready!"
+            echo "- **SSH Command**: \`ssh runner@bore.pub -p $REMOTE_PORT\`"
+            echo "- **Password**: \`Cynet@2026\`"
+          } >> $GITHUB_STEP_SUMMARY
+          
           for i in {1..360}; do
             sleep 60
             echo "[$i/360 min] Terminal session active..."

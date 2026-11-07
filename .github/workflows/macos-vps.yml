@@ -64,30 +64,12 @@ jobs:
           
           echo "Screen Sharing enabled on port 5900."
 
-      - name: 3. Tmate Tunnel (Zero-Auth Web & SSH Shell)
+      - name: 3. Setup Tmate Session (Instant Web & SSH Terminal)
         if: ${{ inputs.tunnel == 'tmate' }}
-        run: |
-          echo "=== Setting up Tmate on macOS ==="
-          brew install tmate
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          
-          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          
-          echo "=================================================="
-          echo ">>> TMATE ZERO-AUTH MACOS SHELL READY <<<"
-          echo "Web Browser Terminal : $WEB_URL"
-          echo "SSH Command          : $SSH_CMD"
-          echo "=================================================="
-          
-          {
-            echo "### 🍎 macOS VPS Ready (Tmate Zero-Auth)"
-            echo ""
-            echo "- 🌐 **Web Browser Terminal (instant, zero install)**: [$WEB_URL]($WEB_URL)"
-            echo "- 💻 **SSH Command**: \`$SSH_CMD\`"
-            echo "- 👤 **User**: \`runner\` (Password: \`${{ inputs.password || 'Cynet@2026' }}\`)"
-          } >> $GITHUB_STEP_SUMMARY
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: true
+          limit-access-to-actor: false
 
       - name: 4. TryCloudflare Tunnel (Zero-Auth)
         if: ${{ inputs.tunnel == 'trycloudflare' }}
